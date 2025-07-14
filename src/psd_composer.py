@@ -228,86 +228,134 @@ def compose_layers(layers_dir, output_path=None):
         # 获取当前目录下的所有文件和子目录
         items = os.listdir(group_dir)
         
-        # 处理当前目录下的图层组自身的PNG和JSON
-        group_name = os.path.basename(group_dir)
-        group_png = os.path.join(group_dir, f"{group_name}.png")
-        group_json = os.path.join(group_dir, f"{group_name}.json")
-        
-        # 检查图层组的PNG和JSON是否存在
-        if os.path.exists(group_png) and os.path.exists(group_json):
-            # 读取图层组元数据
-            with open(group_json, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
+        # 如果是根目录（第一层级）
+        if depth == 0:
+            # 处理根目录下的PSD文件本身的PNG和JSON
+            for item in items:
+                if item.endswith('.png') and not os.path.isdir(os.path.join(group_dir, item)):
+                    # 找到对应的JSON文件
+                    json_file = os.path.splitext(item)[0] + '.json'
+                    if json_file in items:
+                        png_path = os.path.join(group_dir, item)
+                        json_path = os.path.join(group_dir, json_file)
+                        
+                        # 读取元数据
+                        with open(json_path, 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+                        
+                        # 添加到图层组列表作为根图层
+                        layer_groups.append({
+                            'path': group_dir,
+                            'png': png_path,
+                            'metadata': metadata,
+                            'depth': depth,
+                            'full_path': os.path.splitext(item)[0],
+                            'index': metadata.get('index', 0)  # 获取图层索引，用于同级图层排序
+                        })
             
-            # 计算完整路径用于排序
-            full_path = os.path.join(parent_path, group_name) if parent_path else group_name
-            
-            # 添加到图层组列表
-            layer_groups.append({
-                'path': group_dir,
-                'png': group_png,
-                'metadata': metadata,
-                'depth': depth,
-                'full_path': full_path,
-                'index': metadata.get('index', 0)  # 获取图层索引，用于同级图层排序
-            })
-        
-        # 递归处理子目录
-        for item in items:
-            item_path = os.path.join(group_dir, item)
-            if os.path.isdir(item_path):
-                new_parent_path = os.path.join(parent_path, group_name) if parent_path else group_name
-                collect_groups(item_path, depth + 1, new_parent_path)
+            # 处理第一层级的子目录
+            for item in items:
+                item_path = os.path.join(group_dir, item)
+                if os.path.isdir(item_path):
+                    # 检查子目录中是否有与目录同名的PNG和JSON文件
+                    item_name = os.path.basename(item_path)
+                    item_png = os.path.join(item_path, f"{item_name}.png")
+                    item_json = os.path.join(item_path, f"{item_name}.json")
+                    
+                    if os.path.exists(item_png) and os.path.exists(item_json):
+                        # 读取图层元数据
+                        with open(item_json, 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+                        
+                        # 添加到图层组列表
+                        layer_groups.append({
+                            'path': item_path,
+                            'png': item_png,
+                            'metadata': metadata,
+                            'depth': depth + 1,
+                            'full_path': item_name,
+                            'index': metadata.get('index', 0)  # 获取图层索引，用于同级图层排序
+                        })
+                    
+                    # 不再递归处理更深层次的子目录
+        # 如果不是根目录，则不做任何处理（不收集更深层次的图层）
     
     # 从根目录开始收集图层组信息
     collect_groups(layers_dir)
     
     # 在PSD中，图层从下到上的顺序对应索引从小到大
     # 我们需要先渲染底层图层，然后是上层图层
-    # 但是，我们需要先处理浅层图层组，再处理深层图层组
-    # 因为深层图层组应该覆盖在浅层图层组上面
-    # 所以按深度升序排列，对于同一深度的图层，按照索引升序排列
-    layer_groups.sort(key=lambda x: (x['depth'], x['metadata'].get('index', 0)))
+    # 在PSD中，索引较大的图层应该覆盖在索引较小的图层上面
+    # 由于我们只考虑第一层级的PNG，排序逻辑可以简化
+    
+    # 首先，将图层按深度分为两组：深度为0的根图层和深度为1的第一层子图层
+    root_layers = [group for group in layer_groups if group['depth'] == 0]
+    first_level_layers = [group for group in layer_groups if group['depth'] == 1]
+    
+    # 对第一层子图层按索引从大到小排序，确保索引较大的图层后渲染
+    # 这样可以确保索引较大的图层（在PSD中位于上层）覆盖在索引较小的图层（在PSD中位于下层）上面
+    first_level_layers.sort(key=lambda x: x['metadata'].get('index', 0), reverse=True)
+    
+    # 先渲染第一层子图层，然后渲染根图层（如果有）
+    # 这样可以确保根图层（通常是PSD合成图像）覆盖在子图层上面
+    sorted_layer_groups = first_level_layers + root_layers
     
     print(f"排序后的图层组顺序:")
-    for group in layer_groups:
-        print(f"  - 图层组: {group['metadata']['path']}, 深度: {group['depth']}, 索引: {group['metadata'].get('index', 0)}, 可见性: {group['metadata'].get('visible', True)}")
+    for group in sorted_layer_groups:
+        # 使用full_path或者从png路径中提取名称
+        layer_name = group['full_path'] if 'full_path' in group else os.path.basename(os.path.dirname(group['png']))
+        print(f"  - 图层组: {layer_name}, 深度: {group['depth']}, 索引: {group['metadata'].get('index', 0)}, 可见性: {group['metadata'].get('visible', True)}")
     
     # 渲染图层组
-    for group in layer_groups:
-        # 检查图层是否可见
-        visible = group['metadata'].get('visible', True)
-        if visible:
-            try:
-                # 读取图层组图像
-                layer_image = Image.open(group['png'])
-                
-                # 获取不透明度
-                opacity = group['metadata'].get('opacity', 255) / 255.0
-                
-                # 创建一个与画布大小相同的透明图像
-                temp = Image.new('RGBA', canvas.size, (0, 0, 0, 0))
-                
-                # 将图层组图像粘贴到正确的位置
-                temp.paste(layer_image, (group['metadata']['left'], group['metadata']['top']), layer_image)
-                
-                # 应用混合模式和不透明度
-                blend_mode = group['metadata'].get('blend_mode', 'BlendMode.NORMAL')
-                
-                # 打印图层信息，帮助调试
-                print(f"正在合成图层组: {group['metadata']['path']}")
-                print(f"  - 深度: {group['depth']}, 索引: {group['metadata'].get('index', 0)}")
-                print(f"  - 混合模式: {blend_mode}, 不透明度: {opacity:.2f}, 可见性: {visible}")
-                
-                # 应用混合模式和不透明度
-                canvas = apply_blend_mode(canvas, temp, blend_mode, opacity)
-                
-                print(f"已合成图层组: {group['metadata']['path']}")
-            except Exception as e:
-                print(f"无法处理图层组 {os.path.basename(group['path'])}: {e}")
-        else:
-            print(f"跳过不可见图层组: {group['metadata']['path']}")
-            print(f"  - 深度: {group['depth']}, 索引: {group['metadata'].get('index', 0)}, 可见性: {visible}")
+    # 按照排序后的顺序直接渲染图层
+    for group in sorted_layer_groups:
+            # 检查图层是否可见
+            visible = group['metadata'].get('visible', True)
+            if visible:
+                try:
+                    # 读取图层组图像
+                    layer_image = Image.open(group['png'])
+                    
+                    # 获取不透明度
+                    opacity = group['metadata'].get('opacity', 255) / 255.0
+                    
+                    # 创建一个与画布大小相同的透明图像
+                    temp = Image.new('RGBA', canvas.size, (0, 0, 0, 0))
+                    
+                    # 将图层组图像粘贴到正确的位置
+                    # 如果是根目录下的PNG文件（如PSD合成图像），则粘贴到(0,0)位置
+                    # 否则使用元数据中的位置信息
+                    if 'left' in group['metadata'] and 'top' in group['metadata']:
+                        temp.paste(layer_image, (group['metadata']['left'], group['metadata']['top']), layer_image)
+                    else:
+                        # 对于根目录下的PNG文件，假设它们应该覆盖整个画布
+                        # 直接使用图像而不使用透明度蒙版
+                        temp.paste(layer_image, (0, 0))
+                    
+                    # 应用混合模式和不透明度
+                    blend_mode = group['metadata'].get('blend_mode', 'BlendMode.NORMAL')
+                    
+                    # 获取图层名称
+                    layer_name = group['full_path'] if 'full_path' in group else os.path.basename(os.path.dirname(group['png']))
+                    
+                    # 打印图层信息，帮助调试
+                    print(f"正在合成图层组: {layer_name}")
+                    print(f"  - 深度: {group['depth']}, 索引: {group['metadata'].get('index', 0)}")
+                    print(f"  - 混合模式: {blend_mode}, 不透明度: {opacity:.2f}, 可见性: {visible}")
+                    
+                    # 应用混合模式和不透明度
+                    canvas = apply_blend_mode(canvas, temp, blend_mode, opacity)
+                    
+                    print(f"已合成图层组: {layer_name}")
+                except Exception as e:
+                    # 获取图层名称
+                    layer_name = group['full_path'] if 'full_path' in group else os.path.basename(os.path.dirname(group['png']))
+                    print(f"无法处理图层组 {layer_name}: {e}")
+            else:
+                # 获取图层名称
+                layer_name = group['full_path'] if 'full_path' in group else os.path.basename(os.path.dirname(group['png']))
+                print(f"跳过不可见图层组: {layer_name}")
+                print(f"  - 深度: {group['depth']}, 索引: {group['metadata'].get('index', 0)}, 可见性: {visible}")
     
     # 如果没有指定输出路径，则使用PSD文件名
     if output_path is None:

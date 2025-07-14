@@ -19,12 +19,46 @@ def parse_psd(psd_path):
     }
     
     # 递归提取图层信息
-    def extract_layer_info(layers, parent_group=None):
+    def extract_layer_info(layers, parent_group=None, parent_path='', used_names=None):
         layer_info_list = []
         
+        # 初始化已使用名称字典
+        if used_names is None:
+            used_names = {}
+        
         for i, layer in enumerate(layers):
+            # 构建图层路径
+            layer_name = layer.name
+            if parent_path:
+                layer_path = f"{parent_path}/{layer_name}"
+            else:
+                layer_path = layer_name
+                
+            # 检查是否与父层同名，如果是则添加后缀
+            save_name = layer_name
+            if parent_path:
+                parent_basename = parent_path.split('/')[-1] if '/' in parent_path else parent_path
+                if save_name == parent_basename:
+                    # 获取当前路径下已使用的后缀数
+                    parent_key = parent_path if parent_path else ''
+                    if parent_key not in used_names:
+                        used_names[parent_key] = {}
+                    
+                    if save_name not in used_names[parent_key]:
+                        used_names[parent_key][save_name] = 0
+                    
+                    suffix_num = used_names[parent_key][save_name] + 1
+                    used_names[parent_key][save_name] = suffix_num
+                    save_name = f"{layer_name}_sub_{suffix_num}"
+                    # 更新图层路径以包含后缀
+                    if parent_path:
+                        layer_path = f"{parent_path}/{save_name}"
+                    else:
+                        layer_path = save_name
+                
             layer_info = {
                 'name': layer.name,
+                'save_name': save_name,  # 添加保存名称，可能包含后缀
                 'visible': layer.is_visible(),
                 'opacity': layer.opacity,
                 'blend_mode': str(layer.blend_mode),  # 将BlendMode转换为字符串
@@ -35,20 +69,21 @@ def parse_psd(psd_path):
                 'width': layer.width,
                 'height': layer.height,
                 'type': layer.__class__.__name__,
+                'path': layer_path,  # 添加图层路径，确保唯一标识
                 'index': i  # 添加图层索引，用于保留原始图层顺序
             }
             
             # 如果是图层组，递归处理子图层
             if isinstance(layer, psd_tools.api.layers.Group):
                 layer_info['type'] = 'Group'
-                layer_info['children'] = extract_layer_info(layer, layer)
+                layer_info['children'] = extract_layer_info(layer, layer, layer_path, used_names)
             
             layer_info_list.append(layer_info)
         
         return layer_info_list
     
     # 提取所有图层信息
-    info['layers'] = extract_layer_info(psd)
+    info['layers'] = extract_layer_info(psd, None, '', {})
     
     return info
 
@@ -61,7 +96,11 @@ def save_layer_images(psd_path, output_dir):
     psd = PSDImage.open(psd_path)
     
     # 递归保存图层
-    def save_layers(layers, parent_path=''):
+    def save_layers(layers, parent_path='', parent_dir='', used_names=None):
+        # 初始化已使用名称字典
+        if used_names is None:
+            used_names = {}
+            
         for i, layer in enumerate(layers):
             # 创建图层保存路径
             layer_name = layer.name.replace('/', '_').replace('\\', '_')
@@ -69,6 +108,29 @@ def save_layer_images(psd_path, output_dir):
                 layer_path = f"{parent_path}/{layer_name}"
             else:
                 layer_path = layer_name
+                
+            # 检查是否与父层同名，如果是则添加后缀
+            save_name = layer_name
+            if parent_dir:
+                parent_basename = os.path.basename(parent_dir)
+                if save_name == parent_basename:
+                    # 获取当前路径下已使用的后缀数
+                    parent_key = parent_dir if parent_dir else ''
+                    if parent_key not in used_names:
+                        used_names[parent_key] = {}
+                    
+                    if save_name not in used_names[parent_key]:
+                        used_names[parent_key][save_name] = 0
+                    
+                    suffix_num = used_names[parent_key][save_name] + 1
+                    used_names[parent_key][save_name] = suffix_num
+                    save_name = f"{layer_name}_sub_{suffix_num}"
+            
+            # 创建文件系统保存路径
+            if parent_dir:
+                save_dir = os.path.join(parent_dir, save_name)
+            else:
+                save_dir = save_name
             
             # 检查是否是图层组
             is_group = isinstance(layer, psd_tools.api.layers.Group)
@@ -76,17 +138,18 @@ def save_layer_images(psd_path, output_dir):
             # 如果是图层组，创建目录并保存合成图像和元数据
             if is_group:
                 # 为图层组创建目录
-                group_dir = os.path.join(output_dir, layer_path)
+                group_dir = os.path.join(output_dir, save_dir)
                 os.makedirs(group_dir, exist_ok=True)
                 
                 try:
                     # 渲染图层组合成图像
                     layer_image = layer.composite()
                     
-                    # 保存合成图像到图层组目录，使用图层组原名
-                    composite_path = os.path.join(group_dir, f"{layer_name}.png")
+                    # 保存合成图像到图层组目录，使用可能添加了后缀的名称
+                    save_basename = os.path.basename(save_dir)
+                    composite_path = os.path.join(group_dir, f"{save_basename}.png")
                     layer_image.save(composite_path)
-                    print(f"已保存图层组合成图像到: {layer_path}/{layer_name}.png")
+                    print(f"已保存图层组合成图像到: {save_dir}/{save_basename}.png")
                     
                     # 提取并保存图层组元数据
                     metadata = {
@@ -106,11 +169,13 @@ def save_layer_images(psd_path, output_dir):
                         'index': i  # 添加图层索引，用于保留原始图层顺序
                     }
                     
-                    # 保存元数据到JSON文件，使用图层组原名
-                    metadata_path = os.path.join(group_dir, f"{layer_name}.json")
+                    # 保存元数据到JSON文件，使用可能添加了后缀的名称
+                    save_basename = os.path.basename(save_dir)
+                    metadata['save_name'] = save_basename  # 添加保存名称到元数据
+                    metadata_path = os.path.join(group_dir, f"{save_basename}.json")
                     with open(metadata_path, 'w', encoding='utf-8') as f:
                         json.dump(metadata, f, ensure_ascii=False, indent=2)
-                    print(f"已保存图层组元数据到: {layer_path}/{layer_name}.json")
+                    print(f"已保存图层组元数据到: {save_dir}/{save_basename}.json")
                     
                     if not layer.is_visible():
                         print(f"已保存不可见图层组: {layer_name}")
@@ -118,16 +183,45 @@ def save_layer_images(psd_path, output_dir):
                     print(f"无法渲染图层组 {layer_name}: {e}")
                     
                 # 递归处理子图层
-                save_layers(layer, layer_path)
+                save_layers(layer, layer_path, save_dir, used_names)
             else:
                 # 非图层组，只处理最深层的图层
+                # 为非图层组创建目录
+                layer_dir = os.path.join(output_dir, save_dir)
+                os.makedirs(layer_dir, exist_ok=True)
+                
                 try:
                     # 尝试直接渲染图层，忽略可见性
                     layer_image = layer.composite()
                     
                     # 保存为PNG，保留透明度
-                    image_path = os.path.join(output_dir, f"{layer_path}.png")
+                    save_basename = os.path.basename(save_dir)
+                    image_path = os.path.join(layer_dir, f"{save_basename}.png")
                     layer_image.save(image_path)
+                    
+                    # 保存图层元数据
+                    metadata = {
+                        'name': layer.name,
+                        'save_name': save_name,  # 添加保存名称到元数据
+                        'visible': layer.is_visible(),
+                        'opacity': layer.opacity,
+                        'blend_mode': str(layer.blend_mode),
+                        'top': layer.top,
+                        'left': layer.left,
+                        'bottom': layer.bottom,
+                        'right': layer.right,
+                        'width': layer.width,
+                        'height': layer.height,
+                        'type': layer.__class__.__name__,
+                        'path': layer_path,
+                        'index': i
+                    }
+                    
+                    # 保存元数据到JSON文件
+                    metadata_path = os.path.join(layer_dir, f"{save_basename}.json")
+                    with open(metadata_path, 'w', encoding='utf-8') as f:
+                        json.dump(metadata, f, ensure_ascii=False, indent=2)
+                    print(f"已保存图层元数据到: {save_dir}/{save_basename}.json")
                     
                     if not layer.is_visible():
                         print(f"已保存不可见图层: {layer_name}")
@@ -141,15 +235,48 @@ def save_layer_images(psd_path, output_dir):
                         
                         # 添加图层类型文本
                         layer_type = layer.__class__.__name__
-                            
-                        image_path = os.path.join(output_dir, f"{layer_path}.png")
+                        
+                        # 确保图层目录存在
+                        layer_dir = os.path.join(output_dir, save_dir)
+                        os.makedirs(layer_dir, exist_ok=True)
+                        
+                        # 保存空白图像
+                        save_basename = os.path.basename(save_dir)
+                        image_path = os.path.join(layer_dir, f"{save_basename}.png")
                         empty_image.save(image_path)
+                        
+                        # 保存图层元数据
+                        metadata = {
+                            'name': layer.name,
+                            'save_name': save_name,  # 添加保存名称到元数据
+                            'visible': layer.is_visible(),
+                            'opacity': layer.opacity,
+                            'blend_mode': str(layer.blend_mode),
+                            'top': layer.top,
+                            'left': layer.left,
+                            'bottom': layer.bottom,
+                            'right': layer.right,
+                            'width': layer.width,
+                            'height': layer.height,
+                            'type': layer_type,
+                            'path': layer_path,
+                            'index': i,
+                            'render_error': str(e)  # 记录渲染错误信息
+                        }
+                        
+                        # 保存元数据到JSON文件
+                        save_basename = os.path.basename(save_dir)
+                        metadata_path = os.path.join(layer_dir, f"{save_basename}.json")
+                        with open(metadata_path, 'w', encoding='utf-8') as f:
+                            json.dump(metadata, f, ensure_ascii=False, indent=2)
+                        print(f"已保存无法渲染图层的元数据到: {save_dir}/{save_basename}.json")
+                        
                         print(f"已创建空白图像代替无法渲染的图层 {layer_name} (类型: {layer_type}): {e}")
                     except Exception as inner_e:
                         print(f"无法为图层 {layer_name} 创建空白图像: {inner_e}")
     
     # 保存所有图层
-    save_layers(psd)
+    save_layers(psd, '', '', {})
     
     # 保存整个PSD的合成图像和元数据
     try:
